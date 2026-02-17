@@ -5,7 +5,37 @@ import * as fs from "fs";
 const API_KEY = process.env.SPIDRA_API_KEY || "";
 const BASE_URL = process.env.SPIDRA_BASE_URL || "";
 const SEARCH_URL = process.env.SEARCH_URL || "https://www.eventbrite.com/d/tx--houston/lecture/";
-const TOTAL_PAGES = parseInt(process.env.TOTAL_PAGES || "2");
+const PAGES_INPUT = process.env.PAGES || "1-2";
+
+// ============ PAGE PARSER ============
+// Supports: "6" (just page 6), "1-5" (pages 1-5), "3,5,7" (specific pages), "1-3,7,9-10" (combined)
+function parsePages(input: string): number[] {
+  const pages = new Set<number>();
+  const trimmed = input.trim();
+  
+  // Parse comma-separated parts
+  const parts = trimmed.split(",").map(p => p.trim()).filter(Boolean);
+  
+  for (const part of parts) {
+    if (part.includes("-")) {
+      // Range: "3-7"
+      const [start, end] = part.split("-").map(n => parseInt(n.trim()));
+      if (!isNaN(start) && !isNaN(end)) {
+        for (let i = Math.min(start, end); i <= Math.max(start, end); i++) {
+          if (i > 0) pages.add(i);
+        }
+      }
+    } else {
+      // Single page: "5" means just page 5
+      const num = parseInt(part);
+      if (!isNaN(num) && num > 0) pages.add(num);
+    }
+  }
+  
+  return Array.from(pages).sort((a, b) => a - b);
+}
+
+const PAGES = parsePages(PAGES_INPUT);
 
 // ============ SPIDRA API ============
 async function scrape(urls: string[], prompt: string): Promise<any> {
@@ -65,7 +95,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`\n🕷️ Eventbrite Scraper\nSearch: ${SEARCH_URL}\nPages: ${TOTAL_PAGES}\n`);
+  console.log(`\n🕷️ Eventbrite Scraper\nSearch: ${SEARCH_URL}\nPages: ${PAGES.join(", ")} (${PAGES.length} total)\n`);
 
   // Archive existing results before starting new scrape
   archiveExistingResults();
@@ -76,7 +106,7 @@ async function main() {
   console.log("📄 Step 1: Getting event URLs...\n");
   const eventUrlSet = new Set<string>();
   
-  for (let page = 1; page <= TOTAL_PAGES; page++) {
+  for (const page of PAGES) {
     const pageUrl = page === 1 ? SEARCH_URL : `${SEARCH_URL}?page=${page}`;
     console.log(`  Page ${page}: ${pageUrl}`);
     try {

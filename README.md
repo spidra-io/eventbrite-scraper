@@ -53,7 +53,7 @@ SPIDRA_BASE_URL=https://api.spidra.io/api
 
 # Scraping options
 SEARCH_URL=https://www.eventbrite.com/d/tx--houston/lecture/
-TOTAL_PAGES=5
+PAGES=1-5
 ```
 
 ### Configuration Options
@@ -63,7 +63,21 @@ TOTAL_PAGES=5
 | `SPIDRA_API_KEY` | Yes | Your Spidra API key | `sk_live_...` |
 | `SPIDRA_BASE_URL` | Yes | Spidra API endpoint | `https://api.spidra.io/api` |
 | `SEARCH_URL` | No | Eventbrite search URL to scrape | `https://www.eventbrite.com/d/ca--san-francisco/tech/` |
-| `TOTAL_PAGES` | No | Number of search pages to scrape (default: 2) | `5` |
+| `PAGES` | No | Pages to scrape (default: `1-2`) | See formats below |
+
+### Page Selection Formats
+
+| Format | Example | Pages Scraped |
+|--------|---------|---------------|
+| Single page | `6` | Just page 6 |
+| Range | `1-5` | Pages 1, 2, 3, 4, 5 |
+| Comma-separated | `3,5,7` | Pages 3, 5, 7 |
+| Combined | `1-3,7,9-10` | Pages 1, 2, 3, 7, 9, 10 |
+
+This allows you to:
+- Resume from where you left off (e.g., `PAGES=6-10` after doing 1-5)
+- Retry specific failed pages (e.g., `PAGES=3,7,12`)
+- Scrape non-contiguous ranges (e.g., `PAGES=1-5,20-25`)
 
 ## Usage
 
