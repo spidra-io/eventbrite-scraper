@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "scrape": "tsx src/index.ts"
+    "scrape": "tsx src/index.ts",
+    "enrich": "tsx src/enrich.ts"
   },
   "author": "Spidra",
   "license": "MIT",
