@@ -44,21 +44,38 @@ const OUTPUT_CSV    = "output/enriched.csv";
  * Pass useProxy = true for sites that block data-center IPs (e.g. Facebook).
  */
 async function scrape(url: string, prompt: string, useProxy = false): Promise<any> {
-  const jobRes = await fetch(`${BASE_URL}/scrape`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
-    body: JSON.stringify({ urls: [{ url }], prompt, output: "json", useProxy }),
-  });
-
-  if (!jobRes.ok) throw new Error(`API error: ${jobRes.status}`);
-  const { jobId } = await jobRes.json();
+  // Submit job with retry on 429
+  let jobId: string | undefined;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const jobRes = await fetch(`${BASE_URL}/scrape`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+      body: JSON.stringify({ urls: [{ url }], prompt, output: "json", useProxy }),
+    });
+    if (jobRes.status === 429) {
+      const wait = attempt * 10000;
+      console.log(`    Rate limited on submit — waiting ${wait / 1000}s (attempt ${attempt}/5)`);
+      await sleep(wait);
+      continue;
+    }
+    if (!jobRes.ok) throw new Error(`API error: ${jobRes.status}`);
+    const body = await jobRes.json();
+    jobId = body.jobId;
+    break;
+  }
+  if (!jobId) throw new Error("Failed to submit job after 5 attempts (rate limited)");
   console.log(`    Job: ${jobId}`);
 
+  // Poll for result
   while (true) {
     await sleep(2000);
     const statusRes = await fetch(`${BASE_URL}/scrape/${jobId}`, {
       headers: { "x-api-key": API_KEY },
     });
+    if (!statusRes.ok) {
+      if (statusRes.status === 429) { await sleep(5000); continue; }
+      throw new Error(`Poll error: ${statusRes.status}`);
+    }
     const data = await statusRes.json();
     if (data.status === "completed") return data.result?.content;
     if (data.status === "failed") throw new Error(data.error || "Job failed");
@@ -178,6 +195,16 @@ async function main() {
     return "";
   };
 
+  // Helper to write a value back to whichever column name actually exists in the row.
+  // Falls back to the first name if none exist yet (adds as new column).
+  const writeCol = (row: Record<string, string>, value: string, ...names: string[]) => {
+    for (const name of names) {
+      const key = Object.keys(row).find(k => k.trim().toLowerCase() === name.toLowerCase());
+      if (key !== undefined) { row[key] = value; return; }
+    }
+    if (value) row[names[0]] = value;
+  };
+
   // Load progress checkpoint so re-runs skip already-enriched rows
   const progress: Record<string, Record<string, string>> = fs.existsSync(PROGRESS_FILE)
     ? JSON.parse(fs.readFileSync(PROGRESS_FILE, "utf-8"))
@@ -205,11 +232,14 @@ async function main() {
     console.log(`[${i + 1}/${rows.length}] ${organizerUrl}`);
 
     // Pull existing values from the CSV row so we don't overwrite data already present
-    let website  = col(row, "Website", "website").trim();
-    let email    = col(row, "email", "Email").trim();
-    let phone    = col(row, "Phone", "phone").trim();
-    let address  = col(row, "Street Address", "address").trim();
-    let facebook = col(row, "Facebook Company Page", "facebook").trim();
+    let website     = col(row, "Website URL", "Website", "website").trim();
+    let email       = col(row, "email", "Email").trim();
+    let phone       = col(row, "Phone Number", "Phone", "phone").trim();
+    let address     = col(row, "Street Address", "address").trim();
+    let facebook    = col(row, "Facebook Company Page", "facebook").trim();
+    let description = col(row, "Description", "description").trim();
+    let city        = col(row, "City", "city").trim();
+    let country     = col(row, "Country/Region", "Country", "country").trim();
 
     try {
       // Step A: Organizer page — find website and Facebook if not already in the CSV
@@ -249,33 +279,54 @@ async function main() {
         }
       }
 
-      // Step C: Facebook — last resort for email/phone/address
-      //   Uses a residential proxy to bypass Facebook's login wall.
-      if (isEmpty(email) && !isEmpty(facebook)) {
+      // Step C: Facebook — fills any still-missing fields using a residential proxy.
+      const needsFacebook = !isEmpty(facebook) && (
+        isEmpty(email) || isEmpty(phone) || isEmpty(address) ||
+        isEmpty(description) || isEmpty(city) || isEmpty(country)
+      );
+      if (needsFacebook) {
         console.log(`  -> Facebook: ${facebook}`);
         const fb = await scrape(facebook, `
-          Extract from About section. Return EXACTLY this flat JSON:
-          { "email": "...", "phone": "...", "address": "..." }
+          Extract from the About/Intro section of this Facebook page.
+          Return EXACTLY this flat JSON:
+          {
+            "email": "...",
+            "phone": "...",
+            "address": "...",
+            "description": "...",
+            "city": "...",
+            "country": "...",
+            "website": "..."
+          }
           Use null for any field not found. Do NOT nest the data.
+          "description" = the page intro or about text.
+          "city" = city name only.
+          "country" = country name only.
+          "address" = full street address.
         `, true) || {};
-        if (fb?.email)                    email   = fb.email;
-        if (isEmpty(phone) && fb?.phone)  phone   = fb.phone;
-        if (isEmpty(address) && fb?.address) address = fb.address;
+        if (isEmpty(email)       && fb?.email)       email       = fb.email;
+        if (isEmpty(phone)       && fb?.phone)       phone       = fb.phone;
+        if (isEmpty(address)     && fb?.address)     address     = fb.address;
+        if (isEmpty(description) && fb?.description) description = fb.description;
+        if (isEmpty(city)        && fb?.city)        city        = fb.city;
+        if (isEmpty(country)     && fb?.country)     country     = fb.country;
+        if (isEmpty(website)     && fb?.website)     website     = fb.website;
       }
 
-      // Write enriched fields back to the row and save progress checkpoint
-      Object.assign(row, {
-        Website:                website,
-        email:                  email,
-        Phone:                  phone,
-        "Street Address":       address,
-        "Facebook Company Page": facebook,
-      });
+      // Write enriched fields back to the row using flexible column name matching
+      writeCol(row, website,     "Website URL", "Website");
+      writeCol(row, email,       "email", "Email");
+      writeCol(row, phone,       "Phone Number", "Phone");
+      writeCol(row, address,     "Street Address", "address");
+      writeCol(row, facebook,    "Facebook Company Page", "facebook");
+      writeCol(row, description, "Description", "description");
+      writeCol(row, city,        "City", "city");
+      writeCol(row, country,     "Country/Region", "Country");
 
-      progress[organizerUrl] = { website, email, phone, address, facebook };
+      progress[organizerUrl] = { website, email, phone, address, facebook, description, city, country };
       fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
 
-      console.log(`  Done: email=${email || "—"} phone=${phone || "—"}\n`);
+      console.log(`  Done: email=${email || "—"} phone=${phone || "—"} city=${city || "—"}\n`);
       enriched++;
     } catch (err: any) {
       console.log(`  Error: ${err.message}\n`);
@@ -285,7 +336,7 @@ async function main() {
   }
 
   // Write final output files
-  const outputHeaders = [...new Set([...headers.map(h => h.trim()), "website", "email", "Phone", "Street Address", "Facebook Company Page"])];
+  const outputHeaders = [...new Set([...headers.map(h => h.trim())])];
   fs.writeFileSync(OUTPUT_CSV, toCSV(outputHeaders, rows));
   fs.writeFileSync(OUTPUT_JSON, JSON.stringify(rows, null, 2));
 

@@ -39,21 +39,38 @@ const OUTPUT_FILE    = "output/events.json";
  * Pass useProxy = true for sites that block data-center IPs (e.g. Facebook).
  */
 async function scrape(url: string, prompt: string, useProxy = false): Promise<any> {
-  const jobRes = await fetch(`${BASE_URL}/scrape`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
-    body: JSON.stringify({ urls: [{ url }], prompt, output: "json", useProxy }),
-  });
-
-  if (!jobRes.ok) throw new Error(`API error: ${jobRes.status}`);
-  const { jobId } = await jobRes.json();
+  // Submit job with retry on 429
+  let jobId: string | undefined;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const jobRes = await fetch(`${BASE_URL}/scrape`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": API_KEY },
+      body: JSON.stringify({ urls: [{ url }], prompt, output: "json", useProxy }),
+    });
+    if (jobRes.status === 429) {
+      const wait = attempt * 10000;
+      console.log(`    Rate limited on submit — waiting ${wait / 1000}s (attempt ${attempt}/5)`);
+      await sleep(wait);
+      continue;
+    }
+    if (!jobRes.ok) throw new Error(`API error: ${jobRes.status}`);
+    const body = await jobRes.json();
+    jobId = body.jobId;
+    break;
+  }
+  if (!jobId) throw new Error("Failed to submit job after 5 attempts (rate limited)");
   console.log(`    Job: ${jobId}`);
 
+  // Poll for result
   while (true) {
     await sleep(2000);
     const statusRes = await fetch(`${BASE_URL}/scrape/${jobId}`, {
       headers: { "x-api-key": API_KEY },
     });
+    if (!statusRes.ok) {
+      if (statusRes.status === 429) { await sleep(5000); continue; }
+      throw new Error(`Poll error: ${statusRes.status}`);
+    }
     const data = await statusRes.json();
     if (data.status === "completed") return data.result?.content;
     if (data.status === "failed") throw new Error(data.error || "Job failed");
@@ -332,9 +349,13 @@ async function main() {
         console.log(`  -> Facebook: ${facebookUrl}`);
         try {
           facebookContact = await scrape(facebookUrl, `
-            Extract from About section. Return EXACTLY this flat JSON:
-            { "email": "...", "phone": "...", "address": "..." }
+            Extract from the About/Intro section of this Facebook page.
+            Return EXACTLY this flat JSON:
+            { "email": "...", "phone": "...", "address": "...", "description": "...", "city": "...", "country": "..." }
             Use null for any field not found. Do NOT nest the data.
+            "description" = the page intro or about text.
+            "city" = city name only.
+            "country" = country name only.
           `, true) || {};
         } catch (err: any) {
           console.log(`    Facebook error: ${err.message}`);
