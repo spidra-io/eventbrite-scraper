@@ -105,7 +105,10 @@ function cleanFacebook(fb: string | null | undefined): string {
  */
 async function resolveUrl(url: string): Promise<string> {
   try {
-    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, { method: "HEAD", redirect: "follow", signal: controller.signal });
+    clearTimeout(timer);
     return res.url || url;
   } catch {
     return url;
@@ -137,33 +140,36 @@ async function tryExtraContactPages(baseUrl: string): Promise<any> {
 
 // ─── CSV Utilities ────────────────────────────────────────────────────────────
 
-function parseCSVLine(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
+function parseCSV(content: string): { headers: string[]; rows: Record<string, string>[] } {
+  const allRows: string[][] = [];
+  let current: string[] = [];
+  let field = "";
   let inQuotes = false;
 
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    const next = content[i + 1];
+
     if (char === '"') {
-      inQuotes = !inQuotes;
-    } else if (char === "," && !inQuotes) {
-      result.push(current.trim());
-      current = "";
+      if (inQuotes && next === '"') { field += '"'; i++; } // escaped quote
+      else inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      current.push(field); field = "";
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && next === '\n') i++; // skip \r\n
+      current.push(field); field = "";
+      if (current.some(f => f.trim())) allRows.push(current);
+      current = [];
     } else {
-      current += char;
+      field += char;
     }
   }
-  result.push(current.trim());
-  return result;
-}
+  if (field || current.length) { current.push(field); if (current.some(f => f.trim())) allRows.push(current); }
 
-function parseCSV(content: string): { headers: string[]; rows: Record<string, string>[] } {
-  const lines = content.split("\n").filter(l => l.trim());
-  const headers = parseCSVLine(lines[0]);
-  const rows = lines.slice(1).map(line => {
-    const values = parseCSVLine(line);
-    return Object.fromEntries(headers.map((h, i) => [h.trim(), values[i] ?? ""]));
-  });
+  const headers = allRows[0]?.map(h => h.trim()) ?? [];
+  const rows = allRows.slice(1).map(values =>
+    Object.fromEntries(headers.map((h, i) => [h, (values[i] ?? "").trim()]))
+  );
   return { headers, rows };
 }
 
@@ -268,7 +274,7 @@ async function main() {
       continue;
     }
 
-    console.log(`[${Object.keys(progress).length + 1}/${rows.length}] ${organizerUrl}`);
+    console.log(`[${i + 1}/${rows.length}] ${organizerUrl}`);
 
     // Step A: Organizer page — find website, Facebook, follower_count, total_events, twitter
     try {
@@ -391,6 +397,9 @@ async function main() {
 
   const allProgress = Object.values(progress);
   const total = allProgress.length;
+  const uniqueOrganizers = new Set(
+    rows.map(r => col(r, "Eventbrite Organizer Website", "Eventbrite organizer url", "organizer_url", "organizer url").trim()).filter(Boolean)
+  ).size;
   // Each field mapped as [possible keys (new + old format), display label]
   const fields: [string[], string][] = [
     [["Website URL", "website"],                "Website URL"],
@@ -415,7 +424,7 @@ async function main() {
   console.log(`  Total scraped  : ${total}`);
   console.log(`  Enriched now   : ${enriched}`);
   console.log(`  Skipped        : ${skipped}`);
-  console.log(`  Remaining      : ${rows.length - total}`);
+  console.log(`  Remaining      : ${uniqueOrganizers - total}`);
   console.log(`${"─".repeat(45)}`);
   console.log(`  Field               Filled    Rate`);
   console.log(`${"─".repeat(45)}`);
