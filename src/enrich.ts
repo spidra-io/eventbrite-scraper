@@ -205,17 +205,25 @@ async function main() {
     if (value) row[names[0]] = value;
   };
 
-  // Load progress checkpoint so re-runs skip already-enriched rows
-  const progress: Record<string, Record<string, string>> = fs.existsSync(PROGRESS_FILE)
+  // Load progress checkpoint — supports keyed object and array (compiled.json) formats
+  const rawProgress: any = fs.existsSync(PROGRESS_FILE)
     ? JSON.parse(fs.readFileSync(PROGRESS_FILE, "utf-8"))
     : {};
+
+  const progress: Record<string, Record<string, string>> = Array.isArray(rawProgress)
+    ? Object.fromEntries(
+        rawProgress
+          .filter((e: any) => e["Eventbrite Organizer Website"])
+          .map((e: any) => [e["Eventbrite Organizer Website"].trim(), e])
+      )
+    : rawProgress;
 
   let enriched = 0;
   let skipped = 0;
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const organizerUrl = col(row, "Eventbrite organizer url", "organizer_url", "organizer url").trim();
+    const organizerUrl = col(row, "Eventbrite Organizer Website", "Eventbrite organizer url", "organizer_url", "organizer url").trim();
 
     if (!organizerUrl) {
       console.log(`[${i + 1}/${rows.length}] No organizer URL — skipping`);
@@ -223,34 +231,61 @@ async function main() {
       continue;
     }
 
+    // Pull existing values from the CSV row so we don't overwrite data already present
+    let website       = col(row, "Website URL", "Website", "website").trim();
+    let email         = col(row, "email", "Email").trim();
+    let phone         = col(row, "Phone Number", "Phone", "phone").trim();
+    let address       = col(row, "Street Address", "address").trim();
+    let facebook      = col(row, "Facebook Company Page", "facebook").trim();
+    let description   = col(row, "Description", "description").trim();
+    let city          = col(row, "City", "city").trim();
+    let country       = col(row, "Country/Region", "Country", "country").trim();
+    let followerCount = col(row, "Eventbrite followers", "follower_count").trim();
+    let totalEvents   = col(row, "total_events", "Total Events").trim();
+    let twitter       = col(row, "Twitter Handle", "twitter").trim();
+
+    // Skip if already in progress checkpoint
     if (progress[organizerUrl]) {
-      Object.assign(row, progress[organizerUrl]);
+      const p = progress[organizerUrl];
+      if ("website" in p || "phone" in p) {
+        // Old format: internal field names — map to correct HubSpot columns
+        writeCol(row, p.website       || "", "Website URL", "Website");
+        writeCol(row, p.email         || "", "email", "Email");
+        writeCol(row, p.phone         || "", "Phone Number", "Phone");
+        writeCol(row, p.address       || "", "Street Address", "address");
+        writeCol(row, p.facebook      || "", "Facebook Company Page", "facebook");
+        writeCol(row, p.description   || "", "Description", "description");
+        writeCol(row, p.city          || "", "City", "city");
+        writeCol(row, p.country       || "", "Country/Region", "Country");
+        writeCol(row, p.follower_count|| "", "Eventbrite followers", "follower_count");
+        writeCol(row, p.total_events  || "", "total_events", "Total Events");
+        writeCol(row, p.twitter       || "", "Twitter Handle", "twitter");
+      } else {
+        // New format: full row with HubSpot field names
+        Object.assign(row, p);
+      }
       skipped++;
       continue;
     }
 
-    console.log(`[${i + 1}/${rows.length}] ${organizerUrl}`);
-
-    // Pull existing values from the CSV row so we don't overwrite data already present
-    let website     = col(row, "Website URL", "Website", "website").trim();
-    let email       = col(row, "email", "Email").trim();
-    let phone       = col(row, "Phone Number", "Phone", "phone").trim();
-    let address     = col(row, "Street Address", "address").trim();
-    let facebook    = col(row, "Facebook Company Page", "facebook").trim();
-    let description = col(row, "Description", "description").trim();
-    let city        = col(row, "City", "city").trim();
-    let country     = col(row, "Country/Region", "Country", "country").trim();
+    console.log(`[${Object.keys(progress).length + 1}/${rows.length}] ${organizerUrl}`);
 
     try {
-      // Step A: Organizer page — find website and Facebook if not already in the CSV
-      if (isEmpty(website)) {
+      // Step A: Organizer page — find website, Facebook, follower_count, total_events, twitter
+      if (isEmpty(website) || isEmpty(followerCount) || isEmpty(totalEvents) || isEmpty(twitter)) {
         console.log(`  -> Organizer page`);
         const org = await scrape(organizerUrl, `
-          Extract: website (external URL, not eventbrite.com), facebook (facebook.com URL), follower_count, total_events.
+          Extract: website (external URL, not eventbrite.com), facebook (facebook.com URL),
+          twitter (twitter.com or x.com URL or handle), follower_count (number), total_events (number).
           Return as flat JSON. Use null for missing fields.
         `);
-        if (org?.website) website = org.website;
-        if (isEmpty(facebook) && org?.facebook) facebook = cleanFacebook(org.facebook);
+        if (isEmpty(website)       && org?.website)                website       = org.website;
+        if (isEmpty(facebook)      && org?.facebook)               facebook      = cleanFacebook(org.facebook);
+        const rawFc = org?.follower_count ?? org?.followers ?? null;
+        const rawTe = org?.total_events  ?? org?.event_count ?? org?.events_count ?? null;
+        if (isEmpty(followerCount) && rawFc != null) followerCount = String(rawFc);
+        if (isEmpty(totalEvents)   && rawTe != null) totalEvents   = String(rawTe);
+        if (isEmpty(twitter)       && org?.twitter)                twitter       = org.twitter;
       }
 
       // Step B: Website — fill in any missing contact fields
@@ -314,16 +349,19 @@ async function main() {
       }
 
       // Write enriched fields back to the row using flexible column name matching
-      writeCol(row, website,     "Website URL", "Website");
-      writeCol(row, email,       "email", "Email");
-      writeCol(row, phone,       "Phone Number", "Phone");
-      writeCol(row, address,     "Street Address", "address");
-      writeCol(row, facebook,    "Facebook Company Page", "facebook");
-      writeCol(row, description, "Description", "description");
-      writeCol(row, city,        "City", "city");
-      writeCol(row, country,     "Country/Region", "Country");
+      writeCol(row, website,       "Website URL", "Website");
+      writeCol(row, email,         "email", "Email");
+      writeCol(row, phone,         "Phone Number", "Phone");
+      writeCol(row, address,       "Street Address", "address");
+      writeCol(row, facebook,      "Facebook Company Page", "facebook");
+      writeCol(row, description,   "Description", "description");
+      writeCol(row, city,          "City", "city");
+      writeCol(row, country,       "Country/Region", "Country");
+      writeCol(row, followerCount, "Eventbrite followers", "follower_count");
+      writeCol(row, totalEvents,   "total_events", "Total Events");
+      writeCol(row, twitter,       "Twitter Handle", "twitter");
 
-      progress[organizerUrl] = { website, email, phone, address, facebook, description, city, country };
+      progress[organizerUrl] = { ...row };
       fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
 
       console.log(`  Done: email=${email || "—"} phone=${phone || "—"} city=${city || "—"}\n`);
@@ -336,15 +374,51 @@ async function main() {
   }
 
   // Write final output files
-  const outputHeaders = [...new Set([...headers.map(h => h.trim())])];
+  // Ensure organizer-derived columns are present even if not in the original CSV
+  const outputHeaders = [...new Set([...headers.map(h => h.trim()), "Eventbrite followers", "total_events", "Twitter Handle"])];
   fs.writeFileSync(OUTPUT_CSV, toCSV(outputHeaders, rows));
   fs.writeFileSync(OUTPUT_JSON, JSON.stringify(rows, null, 2));
 
-  console.log(`\nDone!`);
-  console.log(`Enriched : ${enriched}`);
-  console.log(`Skipped  : ${skipped}`);
-  console.log(`CSV      : ${OUTPUT_CSV}`);
-  console.log(`JSON     : ${OUTPUT_JSON}\n`);
+  // ── Enrichment stats ─────────────────────────────────────────────────────────
+
+  const allProgress = Object.values(progress);
+  const total = allProgress.length;
+  // Each field mapped as [possible keys (new + old format), display label]
+  const fields: [string[], string][] = [
+    [["Website URL", "website"],                "Website URL"],
+    [["email"],                                 "Email"],
+    [["Phone Number", "phone"],                 "Phone"],
+    [["Street Address", "address"],             "Address"],
+    [["Facebook Company Page", "facebook"],     "Facebook"],
+    [["Description", "description"],            "Description"],
+    [["City", "city"],                          "City"],
+    [["Country/Region", "country"],             "Country"],
+    [["Eventbrite followers", "follower_count"],"Follower Count"],
+    [["total_events"],                          "Total Events"],
+    [["Twitter Handle", "twitter"],             "Twitter"],
+  ];
+
+  const pct = (n: number) => total ? `${Math.round((n / total) * 100)}%` : "0%";
+  const hasValue = (v: any) => v && String(v).trim() !== "" && String(v).trim() !== "null";
+
+  console.log(`\n${"─".repeat(45)}`);
+  console.log(`  Enrichment Summary`);
+  console.log(`${"─".repeat(45)}`);
+  console.log(`  Total scraped  : ${total}`);
+  console.log(`  Enriched now   : ${enriched}`);
+  console.log(`  Skipped        : ${skipped}`);
+  console.log(`  Remaining      : ${rows.length - total}`);
+  console.log(`${"─".repeat(45)}`);
+  console.log(`  Field               Filled    Rate`);
+  console.log(`${"─".repeat(45)}`);
+  for (const [keys, label] of fields) {
+    const count = allProgress.filter((p: any) => keys.some(k => hasValue(p[k]))).length;
+    console.log(`  ${label.padEnd(20)}${String(count).padEnd(10)}${pct(count)}`);
+  }
+  console.log(`${"─".repeat(45)}\n`);
+
+  console.log(`CSV  : ${OUTPUT_CSV}`);
+  console.log(`JSON : ${OUTPUT_JSON}\n`);
 }
 
 main().catch(err => {
